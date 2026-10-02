@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">热点分账</string>
+    <string name="notif_channel_name">流量统计</string>
+    <string name="notif_channel_desc">保持热点客户端流量计数器运行</string>
+    <string name="notif_title">热点流量统计中</string>
+    <string name="notif_starting">正在启动计数引擎…</string>
+    <string name="notif_idle">统计已停止</string>
+    <string name="notif_running">计数后端：%1$s</string>
+    <string name="notif_failed">启动失败：%1$s</string>
+    <string name="action_stop">停止</string>
+</resources>
