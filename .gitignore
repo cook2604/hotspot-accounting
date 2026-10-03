@@ -58,3 +58,14 @@ Desktop.ini
 # --- Logs and crash dumps ----------------------------------------------------
 *.log
 hs_err_pid*
+
+# --- GitHub credential handed over by the device-code flow (never committed) ---
+tools/.gh-token
+.gh-config/
+
+# --- Defensive: never commit any credential file, wherever it lands -------------
+*credentials*
+*.gh-token
+*.git-credentials
+tools/gh/
+tools/git/
