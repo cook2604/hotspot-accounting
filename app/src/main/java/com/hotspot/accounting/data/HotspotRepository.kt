@@ -195,10 +195,15 @@ class HotspotRepository(
         return result
     }
 
-    suspend fun applyRateLimit(mac: String, downKbps: Int?, upKbps: Int?): Result<Unit> {
+    suspend fun applyRateLimit(
+        mac: String,
+        downKbps: Int?,
+        upKbps: Int?,
+        ifaceHint: String? = null,
+    ): Result<Unit> {
         val device = db.devices().get(mac)
             ?: return Result.failure(IllegalStateException("设备不存在"))
-        val result = netControl.setRateLimit(mac, device.lastIp, downKbps, upKbps)
+        val result = netControl.setRateLimit(mac, device.lastIp, downKbps, upKbps, ifaceHint)
         if (result.isSuccess) {
             db.devices().updateBillingProfile(
                 mac = mac,
@@ -302,8 +307,14 @@ class HotspotRepository(
             "\"" + value.replace("\"", "\"\"") + "\""
         } else value
 
-    /** Current hotspot interface names, for the diagnostics panel. */
-    suspend fun tetherInterfaces(): List<String> = DeviceDiscovery.tetherInterfaces()
+    /**
+     * Tethering interfaces currently available, each with its transport.
+     *
+     * Returns the full objects rather than bare names so the UI can label a laptop on USB tethering
+     * separately from a phone on the Wi-Fi hotspot.
+     */
+    suspend fun tetherInterfaces(): List<DeviceDiscovery.TetherInterface> =
+        DeviceDiscovery.tetherInterfaces()
 
     private fun rangeBounds(range: ReportRange): Pair<Long, Long> {
         val cal = Calendar.getInstance()

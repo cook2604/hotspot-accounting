@@ -268,15 +268,10 @@ class NftBridgeBackend : CounterBackend {
     }
 
     private suspend fun tetherInterfaces(): List<String> {
-        val out = RootShell.execOrNull("ip -o link show 2>/dev/null") ?: return emptyList()
-        return out.lineSequence().mapNotNull { line ->
-            val name = line.substringAfter(':').trim().substringBefore('@').substringBefore(':').trim()
-            if (name.isEmpty()) null
-            else if (name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("softap") ||
-                name.startsWith("wlan1") || name.startsWith("rndis") || name.startsWith("bt-pan") ||
-                name.startsWith("wlan2")
-            ) name else null
-        }.distinct().toList()
+        // Delegates to DeviceDiscovery so there is exactly one definition of "what is a tether
+        // interface". A second, slightly different list here is how Wi-Fi and USB tethering drift
+        // apart — USB prefixes were missing from this copy originally.
+        return DeviceDiscovery.tetherInterfaceNames()
     }
 
     companion object {

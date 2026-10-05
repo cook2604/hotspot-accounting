@@ -15,6 +15,10 @@ data class DiscoveredClient(
     val mac: String,
     val ip: String?,
     val hostname: String?,
+    /** Tethering interface the client was seen on, e.g. `ap0` (Wi-Fi) or `rndis0` (USB). */
+    val iface: String? = null,
+    /** Transport inferred from [iface]; lets the UI distinguish USB and Wi-Fi clients. */
+    val transport: DeviceDiscovery.Transport = DeviceDiscovery.Transport.UNKNOWN,
 )
 
 /** A live device row combining persisted metadata with in-flight counters. */
@@ -27,6 +31,16 @@ data class LiveDevice(
     val txDelta: Long = 0L,
     val rxDelta: Long = 0L,
     val online: Boolean,
+    /**
+     * Interface this client is currently attached to, and the transport it implies.
+     *
+     * Deliberately in-memory only. Persisting it would need a Room column, and this database uses a
+     * destructive migration — discarding the entire usage history to store a cosmetic label would be
+     * a bad trade. The value is re-derived on every poll, and the rate limiter looks the interface up
+     * live rather than trusting a stored one.
+     */
+    val iface: String? = null,
+    val transport: DeviceDiscovery.Transport = DeviceDiscovery.Transport.UNKNOWN,
 ) {
     val total: Long get() = txBytes + rxBytes
     val delta: Long get() = txDelta + rxDelta
@@ -173,7 +187,8 @@ class CounterManager(
                     }
                     Log.i(
                         TAG,
-                        "new client ${client.mac} ip=${client.ip} host=${client.hostname}" +
+                        "new client ${client.mac} ip=${client.ip} host=${client.hostname} " +
+                            "iface=${client.iface ?: "?"} (${client.transport.label})" +
                             if (defaultPrice > 0.0) " (inherited price $defaultPrice/GB)" else "",
                     )
                 }
@@ -258,7 +273,15 @@ class CounterManager(
 
         flush()
 
-        return buildLiveDevices(deviceMap, counters, onlineMacs, pollDeltas)
+        // Resolve the interface each client is on, so the UI can label USB vs Wi-Fi clients. The
+        // interface list is fetched once and the per-client transport comes from the discovery pass,
+        // which already knows the device name each neighbour was learned on.
+        val ifacesByName = DeviceDiscovery.tetherInterfaces().associateBy { it.name }
+        val ifaceByMac = discovered.associate { c ->
+            c.mac to c.iface?.let { ifacesByName[it] ?: DeviceDiscovery.TetherInterface(it, c.transport) }
+        }
+
+        return buildLiveDevices(deviceMap, counters, onlineMacs, pollDeltas, ifaceByMac)
     }
 
     /** Persists all pending deltas into hour buckets. Safe to call concurrently with polling. */
@@ -326,11 +349,13 @@ class CounterManager(
         counters: List<DeviceTraffic>,
         onlineMacs: Set<String>,
         pollDeltas: Map<String, Pair<Long, Long>>,
+        ifaceByMac: Map<String, DeviceDiscovery.TetherInterface?> = emptyMap(),
     ): List<LiveDevice> {
         val byMac = counters.associateBy { it.mac }
         return deviceMap.values.map { d ->
             val c = byMac[d.mac]
             val delta = pollDeltas[d.mac]
+            val iface = ifaceByMac[d.mac]
             LiveDevice(
                 device = d,
                 txBytes = c?.txBytes ?: 0L,
@@ -338,6 +363,8 @@ class CounterManager(
                 txDelta = delta?.first ?: 0L,
                 rxDelta = delta?.second ?: 0L,
                 online = d.mac in onlineMacs,
+                iface = iface?.name,
+                transport = iface?.transport ?: DeviceDiscovery.Transport.UNKNOWN,
             )
         }.sortedWith(compareByDescending<LiveDevice> { it.online }.thenByDescending { it.total })
     }

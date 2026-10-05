@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hotspot.accounting.core.DeviceDiscovery
 import com.hotspot.accounting.core.LiveDevice
 import com.hotspot.accounting.data.Billing
 import com.hotspot.accounting.data.EngineState
@@ -297,6 +298,18 @@ private fun DeviceCard(
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // How this client is attached. Shown because a desktop on USB tethering and a
+                    // phone on the Wi-Fi hotspot behave differently and are shaped on different links.
+                    if (item.online && item.transport != DeviceDiscovery.Transport.UNKNOWN) {
+                        Text(
+                            buildString {
+                                append(item.transport.label)
+                                item.iface?.let { append(" · ").append(it) }
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
                 if (d.blocked) {
                     Icon(

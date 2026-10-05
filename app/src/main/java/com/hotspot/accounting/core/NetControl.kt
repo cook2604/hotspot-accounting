@@ -29,14 +29,25 @@ class NetControl {
         val hasTc: Boolean,
         val hasEbtables: Boolean,
         val hasIptables: Boolean,
-        val tetherInterfaces: List<String>,
+        /**
+         * Every tethering interface present, with its transport.
+         *
+         * A phone commonly offers Wi-Fi *and* USB tethering simultaneously, so a single interface is
+         * not enough: rate limiting has to act on the one the target client is actually on.
+         */
+        val tetherInterfaces: List<DeviceDiscovery.TetherInterface>,
         val ifbSupported: Boolean,
         val notes: List<String>,
     ) {
         /** Blocking needs a layer where the client MAC is still identifiable. */
         val canBlock: Boolean get() = hasEbtables || hasIptables
-        /** Rate limiting needs tc plus a usable attachment point. */
+        /** Rate limiting needs tc plus at least one usable attachment point. */
         val canRateLimit: Boolean get() = hasTc && (ifbSupported || tetherInterfaces.isNotEmpty())
+
+        /** Comma-separated "name (transport)" summary for the diagnostics panel. */
+        val interfaceSummary: String
+            get() = if (tetherInterfaces.isEmpty()) "未识别"
+            else tetherInterfaces.joinToString { "${it.name}（${it.transport.label}）" }
     }
 
     @Volatile
@@ -65,7 +76,17 @@ class NetControl {
         }
         if (!hasTc) notes += "未找到 tc 命令，限速功能不可用"
         if (!hasEbtables) notes += "未找到 ebtables，断网将退化为下发 iptables 规则"
-        if (ifaces.isEmpty()) notes += "未能识别热点接口名，限速前请先连接一台设备用于探测"
+        if (ifaces.isEmpty()) notes += "未能识别共享接口名，限速前请先连接一台设备用于探测"
+
+        // Point out multi-transport setups explicitly: this is the case where using the wrong
+        // interface silently does nothing, so the user should know both are visible.
+        val transports = ifaces.map { it.transport }.distinct()
+        if (transports.size > 1) {
+            notes += "检测到多种共享方式（${transports.joinToString { it.label }}），限速会按设备所在接口分别生效"
+        }
+        if (transports.contains(DeviceDiscovery.Transport.USB)) {
+            notes += "USB 共享的客户端可达；USB 网卡抓包在二层，按 MAC 计数同样有效"
+        }
 
         val caps = Capabilities(hasTc, hasEbtables, hasIptables, ifaces, ifbSupported, notes)
         capabilities = caps
@@ -148,6 +169,9 @@ class NetControl {
      * IP. Upload is shaped with an ingress police filter on the same interface. Both live in a root
      * qdisc we own (`1:`), never in the tethering stack's.
      *
+     * The interface is chosen per client (see [ifaceHint]) because a phone can tether over Wi-Fi and
+     * USB at the same time, and a rule applied to the wrong link silently does nothing.
+     *
      * If the tethering qdisc already occupies the root handle on that interface, we bail out with a
      * clear error instead of deleting someone else's qdisc.
      */
@@ -156,6 +180,15 @@ class NetControl {
         ip: String?,
         downKbps: Int?,
         upKbps: Int?,
+        /**
+         * Interface the client is on. When null, it is resolved from [ip] via the neighbour table.
+         *
+         * Previously this always took the *first* tether interface, which meant a machine on USB
+         * tethering would have its rate applied to the Wi-Fi AP — either doing nothing for that client
+         * or throttling unrelated Wi-Fi clients. Resolving per client is what makes USB tethering
+         * work correctly alongside a Wi-Fi hotspot.
+         */
+        ifaceHint: String? = null,
     ): Result<Unit> {
         val m = requireValidMac(mac)
         val caps = capabilities()
@@ -163,13 +196,25 @@ class NetControl {
         if (!caps.hasTc) {
             return Result.failure(IllegalStateException("系统缺少 tc 命令，无法限速"))
         }
+
+        // Resolve the target interface: explicit hint, then the neighbour table, then a single
+        // unambiguous tether interface if there is exactly one.
+        val resolved: String? = ifaceHint?.takeIf { it.isNotBlank() }
+            ?: ip?.let { DeviceDiscovery.interfaceForAddress(it) }
+            ?: caps.tetherInterfaces.singleOrNull()?.name
+
         if (downKbps == null && upKbps == null) {
-            return clearRateLimit(mac, ip)
+            // Clearing: hand the resolved interface through so the limit is removed from the link it
+            // was actually applied to.
+            return clearRateLimit(mac, ip, resolved)
         }
 
-        val iface = caps.tetherInterfaces.firstOrNull()
+        val iface = resolved
             ?: return Result.failure(
-                IllegalStateException("无法确定热点接口名，请先让一台设备连接热点后重试")
+                IllegalStateException(
+                    "无法确定该设备所在的网络接口（可能同时开启了多个共享方式）。\n" +
+                        "请确认设备仍在线后重试；当前已识别接口：" + caps.interfaceSummary
+                )
             )
 
         // Safety gate: refuse if the root qdisc on this interface is not ours.
@@ -179,7 +224,7 @@ class NetControl {
             return Result.failure(
                 IllegalStateException(
                     "接口 $iface 上已存在系统自建的队列规则：$occupier\n" +
-                        "直接叠加会破坏热点，已中止。请先关闭再开启一次热点后重试。"
+                        "直接叠加会破坏该共享方式，已中止。请先关闭再开启一次共享后重试。"
                 )
             )
         }
@@ -265,10 +310,16 @@ class NetControl {
     }
 
     /** Removes every rate-limit object belonging to [mac]. */
-    suspend fun clearRateLimit(mac: String, ip: String?): Result<Unit> {
+    suspend fun clearRateLimit(mac: String, ip: String?, ifaceHint: String? = null): Result<Unit> {
         val m = requireValidMac(mac)
         val caps = capabilities()
-        val iface = caps.tetherInterfaces.firstOrNull()
+
+        // Same resolution order as setRateLimit, so a limit applied on rndis0 is cleared from rndis0.
+        val iface = ifaceHint?.takeIf { it.isNotBlank() }
+            ?: ip?.let { DeviceDiscovery.interfaceForAddress(it) }
+            ?: caps.tetherInterfaces.singleOrNull()?.name
+            ?: caps.tetherInterfaces.firstOrNull()?.name
+
         if (iface != null) {
             if (ip != null) {
                 RootShell.exec(
@@ -300,7 +351,6 @@ class NetControl {
     suspend fun revertAll(): List<String> {
         val log = mutableListOf<String>()
         val caps = capabilities()
-        val iface = caps.tetherInterfaces.firstOrNull()
 
         if (caps.hasEbtables) {
             RootShell.exec("ebtables -D FORWARD -j HSACC_BLOCK 2>/dev/null")
@@ -308,11 +358,15 @@ class NetControl {
             RootShell.exec("ebtables -X HSACC_BLOCK 2>/dev/null")
             log += "已清除 ebtables 断网规则"
         }
-        if (caps.hasTc && iface != null) {
-            RootShell.exec("tc qdisc del dev $iface handle ffff: ingress 2>/dev/null")
-            RootShell.exec("tc qdisc del dev $iface root handle 1: 2>/dev/null")
+        // Clean every tether interface, not just one: with Wi-Fi and USB tethering both active, a
+        // qdisc could have been created on either, and leaving one behind would keep throttling.
+        if (caps.hasTc && caps.tetherInterfaces.isNotEmpty()) {
+            for (t in caps.tetherInterfaces) {
+                RootShell.exec("tc qdisc del dev ${t.name} handle ffff: ingress 2>/dev/null")
+                RootShell.exec("tc qdisc del dev ${t.name} root handle 1: 2>/dev/null")
+            }
             RootShell.exec("ip link del ifb-hsacc 2>/dev/null")
-            log += "已清除 $iface 上的限速队列"
+            log += "已清除限速队列：" + caps.interfaceSummary
         }
         appliedBlocks.clear()
         appliedRates.clear()

@@ -3,6 +3,7 @@ package com.hotspot.accounting.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.hotspot.accounting.core.DeviceDiscovery
 import com.hotspot.accounting.core.LiveDevice
 import com.hotspot.accounting.core.NetControl
 import com.hotspot.accounting.core.VerifyResult
@@ -44,8 +45,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _capabilities = MutableStateFlow<NetControl.Capabilities?>(null)
     val capabilities: StateFlow<NetControl.Capabilities?> = _capabilities.asStateFlow()
 
-    private val _interfaces = MutableStateFlow<List<String>>(emptyList())
-    val interfaces: StateFlow<List<String>> = _interfaces.asStateFlow()
+    private val _interfaces = MutableStateFlow<List<DeviceDiscovery.TetherInterface>>(emptyList())
+    val interfaces: StateFlow<List<DeviceDiscovery.TetherInterface>> = _interfaces.asStateFlow()
 
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
@@ -163,8 +164,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         viewModelScope.launch {
             repo.updateBilling(mac, nickname, pricePerGb, note, billable, limitDown, limitUp)
+            // Pass the interface the client is currently on, so a USB-tethered machine is shaped on
+            // rndis0/usb0 rather than on the Wi-Fi AP (which would not affect it at all).
+            val iface = liveDevices.value.firstOrNull { it.device.mac == mac }?.iface
             // If a cap was set or cleared, push it to the kernel; report failures honestly.
-            val result = repo.applyRateLimit(mac, limitDown, limitUp)
+            val result = repo.applyRateLimit(mac, limitDown, limitUp, iface)
             if (result.isFailure) {
                 post("限速未生效：${result.exceptionOrNull()?.message}", isError = true)
             } else {

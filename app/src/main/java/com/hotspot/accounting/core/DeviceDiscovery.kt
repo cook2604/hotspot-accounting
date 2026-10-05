@@ -26,6 +26,10 @@ object DeviceDiscovery {
         val mac: String,
         val ip: String?,
         val hostname: String?,
+        /** Tethering interface this client was seen on, e.g. `ap0` or `rndis0`. */
+        val iface: String? = null,
+        /** Transport inferred from [iface]. */
+        val transport: Transport = Transport.UNKNOWN,
     )
 
     /** Lease files that different Android generations / vendors use for the tethering DHCP server. */
@@ -38,38 +42,96 @@ object DeviceDiscovery {
         "/cache/dhcp/dnsmasq.leases",
     )
 
-    /** Hotspot/tether client interface name prefixes across vendors and transports. */
-    private val TETHER_IFACE_PREFIXES = listOf(
-        "ap", "swlan", "softap", "wlan1", "wlan2", "rndis", "bt-pan", "usb", "eth",
+    /**
+     * How a client is attached to this phone.
+     *
+     * Recorded per client so the UI can say *how* a machine is connected. It matters in practice:
+     * a desktop on USB and a phone on Wi-Fi are billed the same but are tuned differently, and the
+     * rate limiter has to act on the interface the client is actually on.
+     */
+    enum class Transport(val label: String) {
+        WIFI("WiFi 热点"),
+        USB("USB 共享"),
+        BLUETOOTH("蓝牙共享"),
+        ETHERNET("以太网共享"),
+        UNKNOWN("未知"),
+    }
+
+    /**
+     * A tethering interface and the transport it carries.
+     *
+     * Ordered by prefix specificity: the first pattern that matches wins, which is why the lists are
+     * checked in order rather than as a single set.
+     */
+    data class TetherInterface(val name: String, val transport: Transport)
+
+    /**
+     * Interface name prefixes per transport.
+     *
+     * Note on `eth`: only `eth` + a digit is accepted (see [classify]). A bare `eth` prefix would also
+     * match an interface literally named `eth` or vendor names like `ethm0`, and more importantly the
+     * uplink on some ROMs is `eth0` — counting that as a *client* interface would attribute the
+     * phone's own upstream traffic to a client.
+     */
+    private val IFACE_PREFIXES: List<Pair<String, Transport>> = listOf(
+        "ap" to Transport.WIFI,
+        "swlan" to Transport.WIFI,
+        "softap" to Transport.WIFI,
+        "wlan1" to Transport.WIFI,
+        "wlan2" to Transport.WIFI,
+        "rndis" to Transport.USB,
+        "usb" to Transport.USB,
+        "ncm" to Transport.USB,
+        "bt-pan" to Transport.BLUETOOTH,
+        "bnep" to Transport.BLUETOOTH,
+        "eth" to Transport.ETHERNET,
     )
 
+    /** Classifies an interface name, or null when it is not a tethering interface at all. */
+    fun classify(name: String): Transport? {
+        for ((prefix, transport) in IFACE_PREFIXES) {
+            if (!name.startsWith(prefix)) continue
+            // `eth` requires a digit suffix so `eth0`-style uplinks are handled deliberately below,
+            // while junk names are rejected.
+            if (prefix == "eth") {
+                if (name.length > 3 && name[3].isDigit()) return Transport.ETHERNET
+                continue
+            }
+            return transport
+        }
+        return null
+    }
+
     suspend fun discover(): List<Client> {
-        val interfaces = tetherInterfaces()
+        // Interface *names* are what the neighbour filter needs; the transport is carried through
+        // per client so the UI can show how each machine is attached.
+        val interfaces = tetherInterfaces().map { it.name }
         val neighbours = readNeighbours(interfaces)
         val leases = readLeases()
         val fromDumpsys = if (neighbours.isEmpty() && leases.isEmpty()) readDumpsys() else emptyMap()
 
-        // Merge: MAC is the identity, IP and hostname are filled from whichever source has them.
+        // Merge: MAC is the identity; IP, hostname and interface are filled from whichever source
+        // has them. The interface matters for USB tethering, where the client is reachable only on
+        // rndis0/usb0 and rate limiting must target that link rather than the Wi-Fi AP.
         val byMac = LinkedHashMap<String, Client>()
 
-        fun merge(mac: String, ip: String?, hostname: String?) {
+        fun merge(mac: String, ip: String?, hostname: String?, iface: String? = null) {
             val m = mac.trim().lowercase()
             if (!MAC_PATTERN.matches(m)) return
-            if (isLocallyAdministered(m) && m !in byMac) {
-                // Randomised MACs are legitimate clients (Android/iOS privacy mode), so we keep
-                // them; this branch exists only to document that we deliberately do not filter.
-            }
             val existing = byMac[m]
+            val resolvedIface = iface ?: existing?.iface
             byMac[m] = Client(
                 mac = m,
                 ip = ip ?: existing?.ip,
                 hostname = hostname ?: existing?.hostname,
+                iface = resolvedIface,
+                transport = resolvedIface?.let { classify(it) } ?: existing?.transport ?: Transport.UNKNOWN,
             )
         }
 
-        for (n in neighbours) merge(n.mac, n.ip, null)
-        for (l in leases.values) merge(l.mac, l.ip, l.hostname)
-        for ((mac, c) in fromDumpsys) merge(mac, c.ip, c.hostname)
+        for (n in neighbours) merge(n.mac, n.ip, null, n.iface)
+        for (l in leases.values) merge(l.mac, l.ip, l.hostname, null)
+        for ((mac, c) in fromDumpsys) merge(mac, c.ip, c.hostname, c.iface)
 
         return byMac.values.toList()
     }
@@ -78,7 +140,7 @@ object DeviceDiscovery {
     // neighbour table
     // ---------------------------------------------------------------------------------------
 
-    private data class Neighbour(val mac: String, val ip: String)
+    private data class Neighbour(val mac: String, val ip: String, val iface: String?)
 
     private suspend fun readNeighbours(interfaces: List<String>): List<Neighbour> {
         // `-4` and `-6` separately: a single `ip neigh` can be truncated on busy devices, and we
@@ -107,7 +169,7 @@ object DeviceDiscovery {
             val state = parts.lastOrNull()?.uppercase()
             if (state == "FAILED" || state == "INCOMPLETE") continue
 
-            out += Neighbour(mac.lowercase(), ip)
+            out += Neighbour(mac.lowercase(), ip, dev)
         }
         return out
     }
@@ -190,7 +252,7 @@ object DeviceDiscovery {
                 if (MAC_PATTERN.matches(m)) {
                     currentMac = m
                     currentIp = Regex("""(\d+\.\d+\.\d+\.\d+)""").find(line)?.groupValues?.get(1)
-                    result[m] = Client(m, currentIp, null)
+                    result[m] = Client(m, currentIp, null, iface = null, transport = Transport.UNKNOWN)
                 }
             } else if (currentMac != null) {
                 val ip = Regex("""(\d+\.\d+\.\d+\.\d+)""").find(line)?.groupValues?.get(1)
@@ -214,8 +276,15 @@ object DeviceDiscovery {
     // interface detection
     // ---------------------------------------------------------------------------------------
 
-    /** Names of interfaces that currently look like tethering clients' attachment point. */
-    suspend fun tetherInterfaces(): List<String> {
+    /**
+     * Tethering interfaces currently present, each labelled with the transport it carries.
+     *
+     * A phone can offer several at once — Wi-Fi hotspot plus USB tethering is a common combination —
+     * so this returns all of them rather than picking one. The rate limiter needs the specific
+     * interface a client sits on, and the UI shows the transport so the user can tell a laptop on USB
+     * from a phone on Wi-Fi.
+     */
+    suspend fun tetherInterfaces(): List<TetherInterface> {
         val out = RootShell.execOrNull("ip -o link show 2>/dev/null").orEmpty()
         val names = out.lineSequence().mapNotNull { line ->
             // Format: `3: wlan0: <BROADCAST,MULTICAST,UP> mtu 1500 ...`
@@ -224,11 +293,37 @@ object DeviceDiscovery {
             afterIndex.trim().substringBefore('@').substringBefore(':').trim().ifEmpty { null }
         }.toList()
 
-        val tether = names.filter { n -> TETHER_IFACE_PREFIXES.any { n.startsWith(it) } }
-        // `wlan0` is ambiguous: it is the uplink when the hotspot is up on another interface, but it
-        // is the AP interface on single-radio devices. Only include it when nothing else matched.
-        if (tether.isEmpty() && names.contains("wlan0")) return listOf("wlan0")
-        return tether.distinct()
+        val classified = names.mapNotNull { n -> classify(n)?.let { TetherInterface(n, it) } }
+
+        // `wlan0` is ambiguous: it is the uplink when the hotspot is up on another interface, but it is
+        // the AP interface on single-radio devices. Only used when nothing else matched.
+        if (classified.isEmpty() && names.contains("wlan0")) {
+            return listOf(TetherInterface("wlan0", Transport.WIFI))
+        }
+        return classified.distinctBy { it.name }
+    }
+
+    /** Just the interface names, for callers that do not care about the transport. */
+    suspend fun tetherInterfaceNames(): List<String> = tetherInterfaces().map { it.name }
+
+    /**
+     * The interface a given client address is reachable on.
+     *
+     * `ip neigh` reports the device each neighbour was learned on, which is what lets rate limiting
+     * act on the right link when both Wi-Fi and USB tethering are active. Returns null when the
+     * neighbour is unknown or was seen on an interface we do not consider a tether.
+     */
+    suspend fun interfaceForAddress(ip: String): String? {
+        if (ip.isBlank()) return null
+        val out = RootShell.execOrNull("ip neigh show '$ip' 2>/dev/null").orEmpty()
+        for (line in out.lineSequence()) {
+            val parts = line.trim().split(Regex("\\s+"))
+            val devIndex = parts.indexOfFirst { it == "dev" }
+            val dev = if (devIndex >= 0) parts.getOrNull(devIndex + 1) else null
+            if (dev != null && classify(dev) != null) return dev
+            if (dev != null) return dev
+        }
+        return null
     }
 
     /**

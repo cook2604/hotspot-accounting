@@ -80,7 +80,11 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 if (engine is EngineState.Failed) {
                     KeyValue("错误", (engine as EngineState.Failed).message, error = true)
                 }
-                KeyValue("热点接口", interfaces.ifEmpty { listOf("未识别") }.joinToString(), mono = true)
+                KeyValue(
+                    "共享接口",
+                    interfaces.joinToString { "${it.name}（${it.transport.label}）" }.ifEmpty { "未识别" },
+                    mono = true,
+                )
 
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
