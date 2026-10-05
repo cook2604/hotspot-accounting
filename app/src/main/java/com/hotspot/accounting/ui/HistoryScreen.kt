@@ -16,16 +16,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -36,8 +31,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hotspot.accounting.data.DeviceUsageRow
 import com.hotspot.accounting.data.ReportRange
+import com.hotspot.accounting.ui.glass.GlassChip
+import com.hotspot.accounting.ui.glass.GlassLargeTitle
+import com.hotspot.accounting.ui.glass.GlassMaterial
+import com.hotspot.accounting.ui.glass.GlassPane
+import com.hotspot.accounting.ui.theme.GlassPalette
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(
     viewModel: MainViewModel,
@@ -48,8 +47,9 @@ fun HistoryScreen(
     val daily by viewModel.daily.collectAsStateWithLifecycle()
 
     Column(Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("用量与账目") },
+        GlassLargeTitle(
+            title = "用量与账目",
+            subtitle = "按区间汇总每台设备的用量与应收",
             actions = {
                 IconButton(onClick = { viewModel.exportCsv(onExportCsv) }) {
                     Icon(Icons.Filled.FileDownload, contentDescription = "导出当前区间 CSV")
@@ -60,14 +60,14 @@ fun HistoryScreen(
         LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = 12.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             items(ReportRange.entries.toList()) { r ->
-                FilterChip(
+                GlassChip(
+                    label = r.label,
                     selected = r == range,
                     onClick = { viewModel.selectRange(r) },
-                    label = { Text(r.label) },
                 )
             }
         }
@@ -81,15 +81,14 @@ fun HistoryScreen(
         }
 
         // Totals
-        Card(
+        GlassPane(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            material = GlassMaterial.THICK,
         ) {
             Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
+                Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column {
@@ -108,7 +107,7 @@ fun HistoryScreen(
                     Text("¥" + Fmt.money(snapshot.totalCharge),
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary)
+                        color = GlassPalette.Money)
                     Text("${snapshot.rows.count { it.pricePerGb > 0 }} 台已设单价",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -116,7 +115,7 @@ fun HistoryScreen(
             }
         }
 
-        HorizontalDivider()
+        Spacer(Modifier.height(6.dp))
 
         if (snapshot.rows.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -148,8 +147,12 @@ fun HistoryScreen(
 
 @Composable
 private fun UsageRow(row: DeviceUsageRow, maxTotal: Long) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp)) {
+    GlassPane(
+        modifier = Modifier.fillMaxWidth(),
+        material = GlassMaterial.REGULAR,
+        contentPadding = 12.dp,
+    ) {
+        Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(row.displayName, style = MaterialTheme.typography.titleSmall,

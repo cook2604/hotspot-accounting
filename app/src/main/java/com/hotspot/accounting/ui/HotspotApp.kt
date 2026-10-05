@@ -2,19 +2,18 @@ package com.hotspot.accounting.ui
 
 import android.content.Intent
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -22,11 +21,16 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hotspot.accounting.ui.glass.GlassBackdrop
+import com.hotspot.accounting.ui.glass.GlassBottomBar
+import com.hotspot.accounting.ui.glass.GlassTab
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     LIVE("实时", Icons.Filled.Wifi),
@@ -34,6 +38,14 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     SETTINGS("设置", Icons.Filled.Settings),
 }
 
+/**
+ * Root of the UI.
+ *
+ * The layout is intentionally not a `Scaffold` with a Material bottom bar. The glass design needs the
+ * backdrop to extend edge to edge *behind* the tab bar, so the bar is placed as a floating overlay in
+ * a `Box` rather than as a docked slot that would cut the backdrop off at its top edge. That also lets
+ * content scroll visibly under the translucent material, which is what makes it read as glass.
+ */
 @Composable
 fun HotspotApp(viewModel: MainViewModel = viewModel()) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
@@ -48,34 +60,41 @@ fun HotspotApp(viewModel: MainViewModel = viewModel()) {
         }
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = {
-            NavigationBar {
-                Tab.entries.forEachIndexed { index, t ->
-                    NavigationBarItem(
-                        selected = tab == index,
-                        onClick = { tab = index },
-                        icon = { Icon(t.icon, contentDescription = t.label) },
-                        label = { Text(t.label) },
-                    )
+    GlassBackdrop(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            // Transparent so the gradient backdrop shows through every layer above it.
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            snackbarHost = { SnackbarHost(snackbar) },
+        ) { inner ->
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(inner)
+            ) {
+                // Padding at the bottom reserves room for the floating bar so the last item of a list
+                // is never hidden behind it.
+                Box(Modifier.fillMaxSize().padding(bottom = 96.dp)) {
+                    when (Tab.entries[tab]) {
+                        Tab.LIVE -> LiveScreen(
+                            viewModel = viewModel,
+                            onExportCsv = { csv -> shareCsv(context, csv) },
+                        )
+                        Tab.HISTORY -> HistoryScreen(
+                            viewModel = viewModel,
+                            onExportCsv = { csv -> shareCsv(context, csv) },
+                        )
+                        Tab.SETTINGS -> SettingsScreen(viewModel = viewModel)
+                    }
                 }
-            }
-        },
-    ) { inner ->
-        Box(Modifier.fillMaxSize().padding(inner)) {
-            when (Tab.entries[tab]) {
-                Tab.LIVE -> LiveScreen(
-                    viewModel = viewModel,
-                    onExportCsv = { csv ->
-                        shareCsv(context, csv)
-                    },
+
+                GlassBottomBar(
+                    tabs = Tab.entries.map { GlassTab(it.label, it.icon) },
+                    selectedIndex = tab,
+                    onSelect = { tab = it },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .windowInsetsPadding(WindowInsets.navigationBars),
                 )
-                Tab.HISTORY -> HistoryScreen(
-                    viewModel = viewModel,
-                    onExportCsv = { csv -> shareCsv(context, csv) },
-                )
-                Tab.SETTINGS -> SettingsScreen(viewModel = viewModel)
             }
         }
     }

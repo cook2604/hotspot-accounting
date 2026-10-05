@@ -8,10 +8,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.core.content.ContextCompat
 import com.hotspot.accounting.ui.HotspotApp
@@ -30,9 +30,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             HotspotAccountingTheme {
+                // Transparent, not colour-filled: HotspotApp paints its own gradient backdrop and the
+                // glass panes need to composite against it. An opaque Surface here would sit on top
+                // of that backdrop and flatten every translucent layer.
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background,
+                    color = Color.Transparent,
                 ) {
                     HotspotApp()
                 }

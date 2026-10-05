@@ -13,17 +13,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,11 +29,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import com.hotspot.accounting.ui.glass.GlassDivider
+import com.hotspot.accounting.ui.glass.GlassLargeTitle
+import com.hotspot.accounting.ui.glass.GlassMaterial
+import com.hotspot.accounting.ui.glass.GlassPane
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hotspot.accounting.data.EngineState
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
     val engine by viewModel.engineState.collectAsStateWithLifecycle()
@@ -50,13 +48,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
     val defaultBillable by viewModel.defaultBillable.collectAsStateWithLifecycle()
 
     Column(Modifier.fillMaxSize()) {
-        TopAppBar(title = { Text("设置与诊断") })
+        // Large translucent title instead of a solid app bar, so the backdrop remains visible.
+        GlassLargeTitle(title = "设置与诊断", subtitle = "诊断、计费默认值与共享方式")
 
         Column(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(12.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             DefaultPriceCard(
@@ -276,14 +275,14 @@ private fun trimTrailingZeros(value: Double): String =
 
 @Composable
 private fun SectionCard(title: String, content: @Composable () -> Unit) {
-    Card(
+    GlassPane(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        material = GlassMaterial.REGULAR,
     ) {
-        Column(Modifier.padding(14.dp)) {
+        Column {
             Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            HorizontalDivider()
+            GlassDivider()
             Spacer(Modifier.height(8.dp))
             content()
         }

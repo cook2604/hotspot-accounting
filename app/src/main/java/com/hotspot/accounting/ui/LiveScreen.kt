@@ -23,9 +23,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -33,7 +30,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,12 +43,16 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hotspot.accounting.core.CounterManager
 import com.hotspot.accounting.core.DeviceDiscovery
 import com.hotspot.accounting.core.LiveDevice
 import com.hotspot.accounting.data.Billing
 import com.hotspot.accounting.data.EngineState
+import com.hotspot.accounting.ui.glass.GlassLargeTitle
+import com.hotspot.accounting.ui.glass.GlassMaterial
+import com.hotspot.accounting.ui.glass.GlassPane
+import com.hotspot.accounting.ui.theme.GlassPalette
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiveScreen(
     viewModel: MainViewModel,
@@ -76,15 +76,14 @@ fun LiveScreen(
     val pricedDeviceCount = live.count { it.device.pricePerGb > 0.0 }
 
     Column(Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("热点流量分账") },
+        GlassLargeTitle(
+            title = "热点分账",
+            subtitle = "按 MAC 统计每台设备的真实用量",
             actions = {
                 IconButton(onClick = { viewModel.runSelfTest(5) }) {
                     Icon(Icons.Filled.Refresh, contentDescription = "计数自检")
                 }
-                IconButton(onClick = {
-                    viewModel.exportCsv(onExportCsv)
-                }) {
+                IconButton(onClick = { viewModel.exportCsv(onExportCsv) }) {
                     Icon(Icons.Filled.FileDownload, contentDescription = "导出 CSV")
                 }
             },
@@ -209,29 +208,59 @@ private fun SummaryRow(
     sessionCharge: Double,
     pricedDeviceCount: Int,
 ) {
-    Row(
-        Modifier
+    // A 2x2 grid instead of a single row: four figures in one row are cramped on a phone, and the
+    // glass pane needs enough height for its rim to read as a distinct surface.
+    GlassPane(
+        modifier = Modifier
             .fillMaxWidth()
-            .padding(16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        material = GlassMaterial.REGULAR,
+        contentPadding = 14.dp,
     ) {
-        Stat("在线设备", "$onlineCount", "共 $totalCount 台")
-        Stat("本次会话", Fmt.bytes(sessionBytes), "自规则安装起")
-        Stat("实时速率", Fmt.bytes(bytesPerSec.toLong()) + "/s", "合计")
-        Stat(
-            label = "应收合计",
-            value = if (pricedDeviceCount > 0) "¥" + Fmt.money(sessionCharge) else "—",
-            hint = if (pricedDeviceCount > 0) "$pricedDeviceCount 台已定价" else "未设单价",
-        )
+        Column {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Stat("在线设备", "$onlineCount", "共 $totalCount 台", Modifier.weight(1f))
+                Stat("本次会话", Fmt.bytes(sessionBytes), "自规则安装起", Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Stat(
+                    "实时速率",
+                    Fmt.bytes(bytesPerSec.toLong()) + "/s",
+                    "合计",
+                    Modifier.weight(1f),
+                )
+                Stat(
+                    label = "应收合计",
+                    value = if (pricedDeviceCount > 0) "¥" + Fmt.money(sessionCharge) else "—",
+                    hint = if (pricedDeviceCount > 0) "$pricedDeviceCount 台已定价" else "未设单价",
+                    modifier = Modifier.weight(1f),
+                    valueColor = GlassPalette.Money,
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun Stat(label: String, value: String, hint: String) {
-    Column {
-        Text(label, style = MaterialTheme.typography.labelMedium,
+private fun Stat(
+    label: String,
+    value: String,
+    hint: String,
+    modifier: Modifier = Modifier,
+    valueColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+) {
+    Column(modifier) {
+        Text(label, style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+            color = valueColor)
         Text(hint, style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -267,14 +296,16 @@ private fun DeviceCard(
     onToggleBlock: () -> Unit,
 ) {
     val d = item.device
-    Card(
+    GlassPane(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = if (item.online) MaterialTheme.colorScheme.surface
-            else MaterialTheme.colorScheme.surfaceVariant,
-        ),
+        // Offline devices get a thinner, dimmer material so the online ones stand out without
+        // resorting to a solid colour change, which would break the translucency.
+        material = if (item.online) GlassMaterial.REGULAR else GlassMaterial.ULTRA_THIN,
+        accent = if (item.online) Color.Transparent
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+        contentPadding = 12.dp,
     ) {
-        Column(Modifier.padding(12.dp)) {
+        Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
