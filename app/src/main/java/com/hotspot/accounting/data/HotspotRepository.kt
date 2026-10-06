@@ -223,12 +223,78 @@ class HotspotRepository(
     suspend fun deleteDevice(mac: String) {
         backend?.removeDevice(mac)
         db.usage().deleteForDevice(mac)
+        // Payment rows go too: this is the "delete everything about this device" action, and leaving
+        // orphaned ledger rows behind would corrupt the totals in the report.
+        db.payments().deleteForDevice(mac)
         db.devices().delete(mac)
     }
 
     suspend fun forgetOldUsage(days: Int): Int {
         val cutoff = System.currentTimeMillis() - days * 86_400_000L
         return db.usage().purgeBefore(cutoff)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Payment ledger
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Records money received from a device.
+     *
+     * The ledger is append-only, so this never edits or deletes existing rows: a correction is made
+     * by recording a negative amount, which is exactly how a paper ledger works and keeps the
+     * question "when did he pay, and how much" answerable.
+     */
+    suspend fun recordPayment(mac: String, amount: Double, paidAt: Long, note: String?): Long {
+        val id = db.payments().insert(
+            PaymentEntity(mac = mac, amount = amount, paidAt = paidAt, note = note)
+        )
+        Log.i(TAG, "payment recorded for $mac: %.2f at %d".format(amount, paidAt))
+        return id
+    }
+
+    /** Forgiving a debt, recorded as a negative payment so it reduces the balance. */
+    suspend fun writeOff(mac: String, amount: Double, note: String?): Long =
+        recordPayment(mac, -kotlin.math.abs(amount), System.currentTimeMillis(), note ?: "销账")
+
+    suspend fun paymentsFor(mac: String): List<PaymentEntity> = db.payments().forDevice(mac)
+
+    fun observePayments(mac: String) = db.payments().observeForDevice(mac)
+
+    suspend fun deletePayment(id: Long) = db.payments().delete(id)
+
+    /** Balance for every device, keyed by MAC. */
+    suspend fun ledgers(): Map<String, DeviceLedger> =
+        db.payments().ledgerForAll().associateBy { it.mac }
+
+    suspend fun ledgerFor(mac: String): DeviceLedger? = db.payments().ledgerFor(mac)
+
+    /** Devices whose return needs a billing decision from the user. */
+    suspend fun devicesNeedingReview(): List<DeviceEntity> =
+        db.devices().devicesNeedingReview()
+
+    /**
+     * Resolves a returned device's outstanding balance.
+     *
+     * @param carryOver true → keep the debt, recorded as carried-over so the UI can show it apart
+     *   from the current session's usage. false → the user says it is settled (or not worth chasing),
+     *   so the balance is zeroed by recording the outstanding amount as paid and the charge baseline
+     *   is reset.
+     */
+    suspend fun resolveBillingReview(mac: String, carryOver: Boolean, note: String?) {
+        val ledger = db.payments().ledgerFor(mac)
+        val outstanding = ledger?.outstanding ?: 0.0
+
+        if (carryOver) {
+            db.devices().resolveBillingReview(mac, debtCarried = outstanding)
+        } else {
+            // Zero the balance by settling it in the ledger, then clear the carried-debt marker.
+            if (outstanding > 0.005) {
+                recordPayment(mac, outstanding, System.currentTimeMillis(), note ?: "回归时结清")
+            }
+            db.devices().resolveBillingReview(mac, debtCarried = 0.0)
+        }
+        Log.i(TAG, "billing review resolved for $mac: carryOver=$carryOver outstanding=$outstanding")
     }
 
     /** Persists the app-wide default billing rate. */

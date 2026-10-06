@@ -19,7 +19,7 @@ data class DeviceEntity(
     /** User-assigned label, e.g. "张三的手机". Null means unnamed. */
     @ColumnInfo(name = "nickname") val nickname: String? = null,
 
-    /** Last hostname reported via DHCP/DNS, useful before the user names the device. */
+    /** Last hostname reported via DHCP/DNS, useful before the user names it. */
     @ColumnInfo(name = "hostname") val hostname: String? = null,
 
     /** Last known IPv4 address. Advisory only; changes across leases. */
@@ -31,13 +31,37 @@ data class DeviceEntity(
     /** Price in currency units per gigabyte. Zero means "not billed". */
     @ColumnInfo(name = "price_per_gb", defaultValue = "0") val pricePerGb: Double = 0.0,
 
-    /**
-     * Free-form billing note, e.g. "包月已付" or "按量结算".
-     */
+    /** Free-form note, e.g. "包月" or "老客户". */
     @ColumnInfo(name = "billing_note") val billingNote: String? = null,
 
     /** Whether usage for this device should accrue charges at all. */
     @ColumnInfo(name = "billable", defaultValue = "1") val billable: Boolean = true,
+
+    /**
+     * Running total of money this device has been charged, in currency units.
+     *
+     * Accumulated incrementally as usage is persisted, rather than derived by re-summing every hour
+     * bucket. That keeps the balance cheap to read, and more importantly makes it possible to
+     * *write off* an amount without rewriting the underlying usage history.
+     */
+    @ColumnInfo(name = "charged_total", defaultValue = "0") val chargedTotal: Double = 0.0,
+
+    /**
+     * Debt deliberately carried over from an earlier session, awaiting an explicit decision.
+     *
+     * This exists because of a real hazard in the original design: kernel counters reset when the
+     * hotspot restarts, and a returning device simply continued accumulating under the same MAC. Old
+     * unsettled charges and new usage became indistinguishable in the total. When a device returns
+     * after a long absence with an outstanding balance, [needsBillingReview] is set so the user is
+     * asked whether to keep the old debt or settle it separately — instead of silently merging.
+     */
+    @ColumnInfo(name = "debt_carried", defaultValue = "0") val debtCarried: Double = 0.0,
+
+    /** Set when a returning device has an unsettled balance that the user must acknowledge. */
+    @ColumnInfo(name = "needs_billing_review", defaultValue = "0") val needsBillingReview: Boolean = false,
+
+    /** When the device was last seen, used to decide whether a return counts as a new session. */
+    @ColumnInfo(name = "offline_since") val offlineSince: Long? = null,
 
     /** Optional per-device download rate cap in kbit/s; null = unlimited. */
     @ColumnInfo(name = "limit_down_kbps") val limitDownKbps: Int? = null,
@@ -68,6 +92,66 @@ data class DeviceEntity(
         get() = nickname?.takeIf { it.isNotBlank() }
             ?: hostname?.takeIf { it.isNotBlank() }
             ?: "未知设备 ${mac.takeLast(5)}"
+}
+
+/**
+ * One money movement for a device: a payment received, or an adjustment/write-off.
+ *
+ * Modelled as an append-only ledger rather than a single "amount paid" field, because in practice
+ * clients pay in instalments and sometimes partially. A running total could not answer "when did he
+ * pay, and how much each time", which is exactly what is needed to chase an outstanding balance.
+ *
+ * [amount] is positive for money received and negative for a write-off (money forgiven), so the sum
+ * can be subtracted from charges directly.
+ */
+@Entity(
+    tableName = "payments",
+    indices = [Index("mac"), Index("paid_at")],
+)
+data class PaymentEntity(
+    @PrimaryKey(autoGenerate = true)
+    @ColumnInfo(name = "id") val id: Long = 0L,
+
+    @ColumnInfo(name = "mac") val mac: String,
+
+    /** Positive = received; negative = forgiven/written off. */
+    @ColumnInfo(name = "amount") val amount: Double,
+
+    /** When the money changed hands — user-supplied, because records may be entered later. */
+    @ColumnInfo(name = "paid_at") val paidAt: Long,
+
+    /** Free-form remark, e.g. "微信" or "先付一半". */
+    @ColumnInfo(name = "note") val note: String? = null,
+
+    /** When the record was created, which can differ from [paidAt]. */
+    @ColumnInfo(name = "recorded_at") val recordedAt: Long = System.currentTimeMillis(),
+)
+
+/**
+ * A device's money position: what it has been charged, what it has paid, and what remains.
+ *
+ * Computed once here so the live list, the report and the CSV can never disagree about a balance.
+ */
+data class DeviceLedger(
+    val mac: String,
+    /** Everything ever charged, including debt carried over from earlier sessions. */
+    val charged: Double,
+    /** Sum of payments received. */
+    val paid: Double,
+    /** Sum of write-offs (positive number). */
+    val writtenOff: Double,
+    /** Debt carried over from a previous session, included in [charged]. */
+    val carriedDebt: Double,
+    /** Charged minus paid minus written off. Positive means the client still owes money. */
+    val outstanding: Double,
+    /** Timestamp of the most recent payment, or null if none. */
+    val lastPaymentAt: Long?,
+) {
+    /** True when nothing has been paid yet on a non-zero balance. */
+    val untouched: Boolean get() = paid == 0.0 && writtenOff == 0.0 && charged > 0.0
+
+    /** True when the client has overpaid and is in credit. */
+    val inCredit: Boolean get() = outstanding < -0.005
 }
 
 /**

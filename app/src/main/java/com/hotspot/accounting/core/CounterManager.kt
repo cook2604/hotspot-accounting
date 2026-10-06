@@ -3,6 +3,7 @@ package com.hotspot.accounting.core
 import android.util.Log
 import androidx.room.withTransaction
 import com.hotspot.accounting.data.AppDatabase
+import com.hotspot.accounting.data.Billing
 import com.hotspot.accounting.data.DeviceEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -259,6 +260,43 @@ class CounterManager(
             lastRaw[c.mac] = c.txBytes to c.rxBytes
         }
 
+        // Track departures and returns.
+        //
+        // This is the mechanism that stops an old unpaid balance from silently merging into a new
+        // session's usage. Kernel counters reset when the hotspot restarts, and a device that comes
+        // back is otherwise indistinguishable from one that never left — the earlier charges and the
+        // new ones would simply pile up under the same MAC with no way to tell them apart.
+        for ((mac, device) in deviceMap) {
+            val present = mac in onlineMacs
+            if (!present) {
+                // First poll that sees it gone: stamp the departure time.
+                if (device.offlineSince == null && now - device.lastSeen > OFFLINE_GRACE_MS) {
+                    db.devices().markOffline(mac, now)
+                }
+            } else {
+                // It is back. If it had been away long enough to matter and still owes money, raise
+                // the review flag so the user decides whether to carry the debt forward.
+                val goneSince = device.offlineSince
+                if (goneSince != null) {
+                    val awayMs = now - goneSince
+                    if (awayMs > RETURN_REVIEW_AFTER_MS && device.needsBillingReview.not()) {
+                        val charged = device.chargedTotal
+                        val ledger = db.payments().ledgerFor(mac)
+                        val outstanding = ledger?.outstanding ?: charged
+                        if (outstanding > 0.005) {
+                            db.devices().flagBillingReview(mac)
+                            Log.i(
+                                TAG,
+                                "device $mac returned after ${awayMs / 3_600_000}h owing " +
+                                    "%.2f; flagged for billing review".format(outstanding),
+                            )
+                        }
+                    }
+                    db.devices().clearOffline(mac)
+                }
+            }
+        }
+
         // Prune counters for devices that are no longer present, so the ruleset stays small.
         // Only prune devices that have been gone for a while to tolerate brief roaming gaps.
         for ((mac, device) in deviceMap) {
@@ -302,11 +340,24 @@ class CounterManager(
             db.withTransaction {
                 for ((mac, delta) in snapshot) {
                     db.usage().accumulate(mac, bucketStart, delta.first, delta.second)
-                    // Advance the persisted baseline so a crash right after this loses nothing.
-                    val raw = lastRaw[mac]
-                    if (raw != null) {
-                        val device = db.devices().get(mac)
-                        if (device != null) {
+
+                    val device = db.devices().get(mac)
+                    if (device != null) {
+                        // Charge for the bytes just persisted, at the device's current rate.
+                        //
+                        // Done incrementally and in the same transaction as the usage, so the money
+                        // owed can never drift out of step with the usage recorded. A rate change
+                        // applies from this point forward, which is the correct behaviour: past usage
+                        // was already charged at the old rate.
+                        val bytes = delta.first + delta.second
+                        if (device.billable && device.pricePerGb > 0.0 && bytes > 0L) {
+                            val amount = Billing.gbFor(bytes) * device.pricePerGb
+                            db.devices().addCharge(mac, amount)
+                        }
+
+                        // Advance the persisted baseline so a crash right after this loses nothing.
+                        val raw = lastRaw[mac]
+                        if (raw != null) {
                             db.devices().saveCounterBaseline(
                                 mac, raw.first, raw.second, device.counterEpoch
                             )
@@ -403,6 +454,23 @@ class CounterManager(
 
         /** How long a device may be absent from the neighbour table before we drop its counter. */
         private const val PRUNE_AFTER_MS = 10 * 60 * 1000L
+
+        /**
+         * Grace period before a device is considered to have left.
+         *
+         * Clients drop off the neighbour table for a few minutes routinely — Wi-Fi power saving, a
+         * brief roam, the phone sleeping. Marking a departure on the first missed poll would make
+         * almost every return look like a new session.
+         */
+        private const val OFFLINE_GRACE_MS = 20 * 60 * 1000L
+
+        /**
+         * How long a device must be away before its return is treated as a new session.
+         *
+         * The whole point is to catch "used it once, left it for weeks, now wants it again". A
+         * shorter window would flag ordinary daily leaving-and-returning, which would be noise.
+         */
+        private const val RETURN_REVIEW_AFTER_MS = 24 * 60 * 60 * 1000L
 
         /** Rounds a timestamp down to the start of its hour bucket. */
         fun hourBucket(ts: Long): Long = ts - (ts % 3_600_000L)

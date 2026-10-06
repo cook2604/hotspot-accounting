@@ -8,6 +8,8 @@ import com.hotspot.accounting.core.LiveDevice
 import com.hotspot.accounting.core.NetControl
 import com.hotspot.accounting.core.VerifyResult
 import com.hotspot.accounting.data.DeviceEntity
+import com.hotspot.accounting.data.DeviceLedger
+import com.hotspot.accounting.data.PaymentEntity
 import com.hotspot.accounting.data.DailyTotal
 import com.hotspot.accounting.data.EngineState
 import com.hotspot.accounting.data.HotspotRepository
@@ -61,13 +63,110 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val defaultPricePerGb: StateFlow<Double> = repo.settings.defaultPricePerGb
     val defaultBillable: StateFlow<Boolean> = repo.settings.defaultBillable
 
+    /** Balance for every device, keyed by MAC. Refreshed alongside the report. */
+    private val _ledgers = MutableStateFlow<Map<String, DeviceLedger>>(emptyMap())
+    val ledgers: StateFlow<Map<String, DeviceLedger>> = _ledgers.asStateFlow()
+
+    /**
+     * A returned device whose outstanding balance needs a decision.
+     *
+     * Surfaced as a dialog rather than left in a list, because the whole point is to stop old debt
+     * from silently merging into a new session's usage.
+     */
+    private val _reviewQueue = MutableStateFlow<List<DeviceEntity>>(emptyList())
+    val reviewQueue: StateFlow<List<DeviceEntity>> = _reviewQueue.asStateFlow()
+
+    /** Payments for the device whose payment dialog is open. */
+    private val _openPayments = MutableStateFlow<List<PaymentEntity>>(emptyList())
+    val openPayments: StateFlow<List<PaymentEntity>> = _openPayments.asStateFlow()
+
     init {
         refreshReport(ReportRange.TODAY)
         refreshDiagnostics()
+        refreshLedgers()
+        refreshReviewQueue()
     }
 
     fun consumeMessage() {
         _message.value = null
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // payment ledger
+    // ---------------------------------------------------------------------------------------
+
+    fun refreshLedgers() {
+        viewModelScope.launch {
+            _ledgers.value = repo.ledgers()
+        }
+    }
+
+    fun refreshReviewQueue() {
+        viewModelScope.launch {
+            _reviewQueue.value = repo.devicesNeedingReview()
+        }
+    }
+
+    /** Loads the payment history for the dialog. */
+    fun loadPayments(mac: String) {
+        viewModelScope.launch {
+            _openPayments.value = repo.paymentsFor(mac)
+        }
+    }
+
+    fun clearOpenPayments() {
+        _openPayments.value = emptyList()
+    }
+
+    fun recordPayment(mac: String, amount: Double, paidAt: Long, note: String?) {
+        viewModelScope.launch {
+            repo.recordPayment(mac, amount, paidAt, note)
+            post("已记录收款 ¥${Fmt.money(amount)}")
+            _openPayments.value = repo.paymentsFor(mac)
+            refreshLedgers()
+            refreshReport()
+        }
+    }
+
+    fun writeOff(mac: String, amount: Double) {
+        viewModelScope.launch {
+            repo.writeOff(mac, amount, "销账")
+            post("已销账 ¥${Fmt.money(amount)}")
+            _openPayments.value = repo.paymentsFor(mac)
+            refreshLedgers()
+            refreshReport()
+        }
+    }
+
+    fun deletePayment(mac: String, id: Long) {
+        viewModelScope.launch {
+            repo.deletePayment(id)
+            post("已删除该笔记录")
+            _openPayments.value = repo.paymentsFor(mac)
+            refreshLedgers()
+            refreshReport()
+        }
+    }
+
+    /**
+     * Resolves a returning device's old balance.
+     *
+     * @param carryOver true keeps the debt (marked as carried-over); false settles it now.
+     */
+    fun resolveReview(mac: String, carryOver: Boolean) {
+        viewModelScope.launch {
+            repo.resolveBillingReview(mac, carryOver, null)
+            post(if (carryOver) "已保留旧账，将单独标注" else "已结清旧账，余额归零")
+            refreshReviewQueue()
+            refreshLedgers()
+            refreshReport()
+        }
+    }
+
+    fun skipReview(mac: String) {
+        // Removed from the queue for this session only; it returns on the next app start so the debt
+        // cannot be forgotten entirely.
+        _reviewQueue.value = _reviewQueue.value.filterNot { it.mac == mac }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -133,6 +232,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshReport(range: ReportRange = _selectedRange.value) {
         viewModelScope.launch {
             _report.value = repo.report(range)
+            // Balances live in a separate query, so refresh them together: the report and the money
+            // position are always read as a pair by the UI.
+            _ledgers.value = repo.ledgers()
         }
     }
 

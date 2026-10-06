@@ -60,6 +60,31 @@ fun HotspotApp(viewModel: MainViewModel = viewModel()) {
         }
     }
 
+    // A device that returns after a long absence still owing money needs an explicit decision, so
+    // old debt does not silently merge into the new session's usage. Polled as well as checked at
+    // startup, because a client can come back at any moment while the app is open.
+    val reviewQueue by viewModel.reviewQueue.collectAsStateWithLifecycle()
+    val ledgers by viewModel.ledgers.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) {
+        while (true) {
+            viewModel.refreshReviewQueue()
+            kotlinx.coroutines.delay(60_000)
+        }
+    }
+
+    reviewQueue.firstOrNull()?.let { device ->
+        BillingReviewDialog(
+            deviceName = device.displayName,
+            outstanding = ledgers[device.mac]?.outstanding ?: device.chargedTotal,
+            awayDescription = device.offlineSince
+                ?.let { "离开 ${Fmt.ago(it)}" }
+                ?: "离开较长时间",
+            onKeepDebt = { viewModel.resolveReview(device.mac, carryOver = true) },
+            onSettleNow = { viewModel.resolveReview(device.mac, carryOver = false) },
+            onDismiss = { viewModel.skipReview(device.mac) },
+        )
+    }
+
     GlassBackdrop(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             // Transparent so the gradient backdrop shows through every layer above it.

@@ -1,0 +1,286 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "44b0183f3e4e77ba9f08fdadc94a0ece",
+    "entities": [
+      {
+        "tableName": "devices",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`mac` TEXT NOT NULL, `nickname` TEXT, `hostname` TEXT, `last_ip` TEXT, `vendor` TEXT, `price_per_gb` REAL NOT NULL DEFAULT 0, `billing_note` TEXT, `billable` INTEGER NOT NULL DEFAULT 1, `charged_total` REAL NOT NULL DEFAULT 0, `debt_carried` REAL NOT NULL DEFAULT 0, `needs_billing_review` INTEGER NOT NULL DEFAULT 0, `offline_since` INTEGER, `limit_down_kbps` INTEGER, `limit_up_kbps` INTEGER, `blocked` INTEGER NOT NULL DEFAULT 0, `raw_tx` INTEGER NOT NULL DEFAULT 0, `raw_rx` INTEGER NOT NULL DEFAULT 0, `counter_epoch` INTEGER NOT NULL DEFAULT 0, `first_seen` INTEGER NOT NULL, `last_seen` INTEGER NOT NULL, PRIMARY KEY(`mac`))",
+        "fields": [
+          {
+            "fieldPath": "mac",
+            "columnName": "mac",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nickname",
+            "columnName": "nickname",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "hostname",
+            "columnName": "hostname",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastIp",
+            "columnName": "last_ip",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "vendor",
+            "columnName": "vendor",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "pricePerGb",
+            "columnName": "price_per_gb",
+            "affinity": "REAL",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "billingNote",
+            "columnName": "billing_note",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "billable",
+            "columnName": "billable",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          },
+          {
+            "fieldPath": "chargedTotal",
+            "columnName": "charged_total",
+            "affinity": "REAL",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "debtCarried",
+            "columnName": "debt_carried",
+            "affinity": "REAL",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "needsBillingReview",
+            "columnName": "needs_billing_review",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "offlineSince",
+            "columnName": "offline_since",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "limitDownKbps",
+            "columnName": "limit_down_kbps",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "limitUpKbps",
+            "columnName": "limit_up_kbps",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "blocked",
+            "columnName": "blocked",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "rawTx",
+            "columnName": "raw_tx",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "rawRx",
+            "columnName": "raw_rx",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "counterEpoch",
+            "columnName": "counter_epoch",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "firstSeen",
+            "columnName": "first_seen",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSeen",
+            "columnName": "last_seen",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "mac"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "usage_buckets",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`mac` TEXT NOT NULL, `bucket_start` INTEGER NOT NULL, `tx_bytes` INTEGER NOT NULL DEFAULT 0, `rx_bytes` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`mac`, `bucket_start`))",
+        "fields": [
+          {
+            "fieldPath": "mac",
+            "columnName": "mac",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bucketStart",
+            "columnName": "bucket_start",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "txBytes",
+            "columnName": "tx_bytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "rxBytes",
+            "columnName": "rx_bytes",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "mac",
+            "bucket_start"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_usage_buckets_bucket_start",
+            "unique": false,
+            "columnNames": [
+              "bucket_start"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_usage_buckets_bucket_start` ON `${TABLE_NAME}` (`bucket_start`)"
+          },
+          {
+            "name": "index_usage_buckets_mac",
+            "unique": false,
+            "columnNames": [
+              "mac"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_usage_buckets_mac` ON `${TABLE_NAME}` (`mac`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "payments",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `mac` TEXT NOT NULL, `amount` REAL NOT NULL, `paid_at` INTEGER NOT NULL, `note` TEXT, `recorded_at` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mac",
+            "columnName": "mac",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amount",
+            "columnName": "amount",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "paidAt",
+            "columnName": "paid_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "note",
+            "columnName": "note",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "recordedAt",
+            "columnName": "recorded_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_payments_mac",
+            "unique": false,
+            "columnNames": [
+              "mac"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_payments_mac` ON `${TABLE_NAME}` (`mac`)"
+          },
+          {
+            "name": "index_payments_paid_at",
+            "unique": false,
+            "columnNames": [
+              "paid_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_payments_paid_at` ON `${TABLE_NAME}` (`paid_at`)"
+          }
+        ],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '44b0183f3e4e77ba9f08fdadc94a0ece')"
+    ]
+  }
+}

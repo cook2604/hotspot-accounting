@@ -54,6 +54,49 @@ interface DeviceDao {
     @Query("UPDATE devices SET blocked = :blocked WHERE mac = :mac")
     suspend fun setBlocked(mac: String, blocked: Boolean)
 
+    /**
+     * Adds a charge to the device's running total.
+     *
+     * Incremental rather than recomputed from usage buckets so that a write-off can be recorded
+     * without rewriting history, and so the balance stays cheap to read.
+     */
+    @Query("UPDATE devices SET charged_total = charged_total + :amount WHERE mac = :mac")
+    suspend fun addCharge(mac: String, amount: Double)
+
+    /** Records the moment a device went offline, used to detect a return after a long absence. */
+    @Query("UPDATE devices SET offline_since = :at WHERE mac = :mac")
+    suspend fun markOffline(mac: String, at: Long)
+
+    /** Clears the offline marker when a device is seen again. */
+    @Query("UPDATE devices SET offline_since = NULL WHERE mac = :mac")
+    suspend fun clearOffline(mac: String)
+
+    /** Raises the "this client came back owing money" flag for the user to resolve. */
+    @Query("UPDATE devices SET needs_billing_review = 1 WHERE mac = :mac")
+    suspend fun flagBillingReview(mac: String)
+
+    /**
+     * Resolves a returned client's outstanding balance.
+     *
+     * @param carryOver true keeps the debt as [DeviceEntity.debtCarried] (so it stays visible but is
+     *   distinguishable from the current session's usage); false treats it as settled and resets the
+     *   charge baseline to zero so the balances shown start clean.
+     * @param settledAmount when settling, the amount considered paid off. Passed through as a payment
+     *   row by the caller, not stored here.
+     */
+    @Query(
+        """
+        UPDATE devices SET
+            debt_carried = :debtCarried,
+            needs_billing_review = 0
+        WHERE mac = :mac
+        """
+    )
+    suspend fun resolveBillingReview(mac: String, debtCarried: Double)
+
+    @Query("SELECT * FROM devices WHERE needs_billing_review = 1")
+    suspend fun devicesNeedingReview(): List<DeviceEntity>
+
     @Query("UPDATE devices SET last_ip = :ip, hostname = COALESCE(:hostname, hostname), last_seen = :seenAt WHERE mac = :mac")
     suspend fun touch(mac: String, ip: String?, hostname: String?, seenAt: Long)
 
@@ -88,6 +131,80 @@ interface DeviceDao {
 
     @Query("DELETE FROM devices WHERE mac = :mac")
     suspend fun delete(mac: String)
+}
+
+/**
+ * Payment ledger operations.
+ *
+ * Append-only by design: a mistake is corrected by recording an adjustment (a negative payment),
+ * never by rewriting history. That matches how a paper ledger is kept and means the "when did he
+ * pay" trail is always intact.
+ */
+@Dao
+interface PaymentDao {
+
+    @Insert
+    suspend fun insert(payment: PaymentEntity): Long
+
+    @Query("SELECT * FROM payments WHERE mac = :mac ORDER BY paid_at DESC")
+    suspend fun forDevice(mac: String): List<PaymentEntity>
+
+    @Query("SELECT * FROM payments WHERE mac = :mac ORDER BY paid_at DESC")
+    fun observeForDevice(mac: String): Flow<List<PaymentEntity>>
+
+    @Query("SELECT * FROM payments ORDER BY paid_at DESC")
+    suspend fun all(): List<PaymentEntity>
+
+    @Query("DELETE FROM payments WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query("DELETE FROM payments WHERE mac = :mac")
+    suspend fun deleteForDevice(mac: String)
+
+    /**
+     * Balance per device.
+     *
+     * Left-joined from `devices` so a device that has never paid still appears — an inner join would
+     * silently drop exactly the clients whose balances matter most.
+     *
+     * `paid` sums positive rows; `written_off` sums the absolute value of negative ones (amounts
+     * forgiven), so both come back as positive numbers and the caller does not have to remember the
+     * sign convention.
+     */
+    @Query(
+        """
+        SELECT d.mac AS mac,
+               d.charged_total AS charged,
+               COALESCE(SUM(CASE WHEN p.amount > 0 THEN p.amount ELSE 0 END), 0) AS paid,
+               COALESCE(-SUM(CASE WHEN p.amount < 0 THEN p.amount ELSE 0 END), 0) AS writtenOff,
+               d.debt_carried AS carriedDebt,
+               d.charged_total
+                 - COALESCE(SUM(p.amount), 0) AS outstanding,
+               MAX(p.paid_at) AS lastPaymentAt
+        FROM devices d
+        LEFT JOIN payments p ON p.mac = d.mac
+        GROUP BY d.mac
+        """
+    )
+    suspend fun ledgerForAll(): List<DeviceLedger>
+
+    @Query(
+        """
+        SELECT d.mac AS mac,
+               d.charged_total AS charged,
+               COALESCE(SUM(CASE WHEN p.amount > 0 THEN p.amount ELSE 0 END), 0) AS paid,
+               COALESCE(-SUM(CASE WHEN p.amount < 0 THEN p.amount ELSE 0 END), 0) AS writtenOff,
+               d.debt_carried AS carriedDebt,
+               d.charged_total
+                 - COALESCE(SUM(p.amount), 0) AS outstanding,
+               MAX(p.paid_at) AS lastPaymentAt
+        FROM devices d
+        LEFT JOIN payments p ON p.mac = d.mac
+        WHERE d.mac = :mac
+        GROUP BY d.mac
+        """
+    )
+    suspend fun ledgerFor(mac: String): DeviceLedger?
 }
 
 @Dao

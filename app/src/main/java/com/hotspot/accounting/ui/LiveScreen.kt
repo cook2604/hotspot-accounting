@@ -31,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,7 +48,9 @@ import com.hotspot.accounting.core.CounterManager
 import com.hotspot.accounting.core.DeviceDiscovery
 import com.hotspot.accounting.core.LiveDevice
 import com.hotspot.accounting.data.Billing
+import com.hotspot.accounting.data.DeviceLedger
 import com.hotspot.accounting.data.EngineState
+import com.hotspot.accounting.ui.glass.GlassDivider
 import com.hotspot.accounting.ui.glass.GlassLargeTitle
 import com.hotspot.accounting.ui.glass.GlassMaterial
 import com.hotspot.accounting.ui.glass.GlassPane
@@ -62,7 +65,14 @@ fun LiveScreen(
     val live by viewModel.liveDevices.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
     val defaultPrice by viewModel.defaultPricePerGb.collectAsStateWithLifecycle()
+    val ledgers by viewModel.ledgers.collectAsStateWithLifecycle()
+    val openPayments by viewModel.openPayments.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<LiveDevice?>(null) }
+    var paying by remember { mutableStateOf<LiveDevice?>(null) }
+
+    // Recompute balances whenever the device list changes, so a balance shown next to a card is
+    // never stale relative to the usage beside it.
+    LaunchedEffect(live.size) { viewModel.refreshLedgers() }
 
     val online = live.count { it.online }
     val sessionTotal = live.sumOf { it.total }
@@ -113,7 +123,12 @@ fun LiveScreen(
                 items(live, key = { it.device.mac }) { item ->
                     DeviceCard(
                         item = item,
+                        ledger = ledgers[item.device.mac],
                         onEdit = { editing = item },
+                        onPayments = {
+                            viewModel.loadPayments(item.device.mac)
+                            paying = item
+                        },
                         onToggleBlock = {
                             viewModel.toggleBlocked(item.device.mac, !item.device.blocked)
                         },
@@ -136,6 +151,26 @@ fun LiveScreen(
                 viewModel.deleteDevice(item.device.mac, keepUsage)
                 editing = null
             },
+        )
+    }
+
+    paying?.let { item ->
+        PaymentDialog(
+            deviceName = item.device.displayName,
+            ledger = ledgers[item.device.mac],
+            payments = openPayments,
+            // Charge accrued during the current session, shown alongside the lifetime balance so the
+            // two are never confused with each other.
+            todayCharge = Fmt.gbValue(item.total) * item.device.pricePerGb,
+            onDismiss = {
+                viewModel.clearOpenPayments()
+                paying = null
+            },
+            onRecord = { amount, paidAt, note ->
+                viewModel.recordPayment(item.device.mac, amount, paidAt, note)
+            },
+            onWriteOff = { amount -> viewModel.writeOff(item.device.mac, amount) },
+            onDeletePayment = { id -> viewModel.deletePayment(item.device.mac, id) },
         )
     }
 }
@@ -292,7 +327,9 @@ private fun EmptyHint(engine: EngineState) {
 @Composable
 private fun DeviceCard(
     item: LiveDevice,
+    ledger: DeviceLedger?,
     onEdit: () -> Unit,
+    onPayments: () -> Unit,
     onToggleBlock: () -> Unit,
 ) {
     val d = item.device
@@ -395,6 +432,61 @@ private fun DeviceCard(
                 }
             }
 
+            Spacer(Modifier.height(8.dp))
+
+            // Money position, when this device is billed. Shown above the raw byte figures because
+            // "how much does he owe" is the question the operator actually has.
+            if (ledger != null && (ledger.charged > 0.005 || ledger.paid > 0.005)) {
+                GlassDivider()
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text(
+                            if (ledger.inCredit) "客户余额" else "尚欠",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "¥" + Fmt.money(kotlin.math.abs(ledger.outstanding)),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = when {
+                                ledger.inCredit -> GlassPalette.Success
+                                ledger.outstanding > 0.005 -> MaterialTheme.colorScheme.error
+                                else -> GlassPalette.Success
+                            },
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("累计应收 / 已收", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "¥${Fmt.money(ledger.charged)} / ¥${Fmt.money(ledger.paid)}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (ledger.lastPaymentAt != null) {
+                            Text(
+                                "上次收款 " + Fmt.ago(ledger.lastPaymentAt),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                if (ledger.carriedDebt > 0.005) {
+                    Text(
+                        "含上次遗留欠款 ¥${Fmt.money(ledger.carriedDebt)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = GlassPalette.Warning,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+
             Spacer(Modifier.height(6.dp))
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -412,7 +504,11 @@ private fun DeviceCard(
                     Spacer(Modifier.width(4.dp))
                     Text(if (d.blocked) "恢复" else "断网")
                 }
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
+                OutlinedButton(onClick = onPayments) {
+                    Text("收款")
+                }
+                Spacer(Modifier.width(6.dp))
                 FilledTonalButton(onClick = onEdit) {
                     Icon(Icons.Filled.Edit, null, Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
