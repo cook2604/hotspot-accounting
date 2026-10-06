@@ -370,8 +370,24 @@ powershell -ExecutionPolicy Bypass -File H:\ddaa\APP\tools\build.ps1 -UseCnMirro
 | 部分老内核无 bridge family | 未编译 `CONFIG_NF_TABLES_BRIDGE` | 自动退回 iptables 后端，精度略降 |
 | 客户端开「随机 MAC」 | 系统隐私功能会轮换 MAC | 同一台手机会显示为多条记录，需各自命名 |
 | 限速功能可能拒绝执行 | 系统热点自带 HTB 队列，硬叠加会打断热点 | App 检测到冲突会**主动拒绝并说明**，不会静默破坏网络 |
-| 断网依赖 ebtables | 需在二层按 MAC 拦截 | 无 ebtables 时明确报错，不退化为「按 IP 断网」（那会因换 IP 而失效） |
+| ~~断网依赖 ebtables~~ | **已修正**：原先只认 ebtables，导致有 nftables 的 ROM 被误判为无法断网 | 现按 **nftables bridge → ebtables → iptables** 顺序尝试，见下方「断网是怎么实现的」 |
 | 少数机型热点在独立 netns | 厂商实现差异 | 看不到邻居表；已提供诊断命令用于确认 |
+
+### 断网是怎么实现的
+
+按优先级依次尝试，**前两者都按 MAC 拦截，客户端换 IP 不受影响**：
+
+| 优先级 | 机制 | 说明 |
+|---|---|---|
+| 1 | **nftables bridge** | 首选。与计数用同一个 family，因此计数能用就一定能断网。规则：`ether saddr <mac> drop` + `ether daddr <mac> drop` |
+| 2 | ebtables | 语义等价，保留给未编译 nft bridge 的内核 |
+| 3 | iptables FORWARD | **最后手段，且是有损的**：iptables 只能匹配 IP，客户端 DHCP 续租换 IP 后规则即失效。仅在没有任何二层手段时使用，界面会明确标注为「按 IP」而不是假装等价 |
+
+> **这里我修正过一个判断错误。** 早期版本在代码和文档里都断言「没有 ebtables 就无法按 MAC 断网，
+> 只能退化为按 IP」。**这是错的** —— nftables 的 bridge family 同样按 MAC 拦截，功能与 ebtables 等价。
+> 当时的能力检测只查了 `which ebtables`，于是在**本应用自己支持的设备上**（该 ROM 有 nftables、没有 ebtables）
+> 断网功能被直接拒绝执行，而实际上设备完全有能力做到。
+> 现在改为真实探测 bridge family（建表+建链后立即删除），而不是只看命令是否存在。
 
 **限速是唯一有风险的功能**。它被设计成：只在确认不冲突时执行、任何步骤失败都自动回滚、
 并提供「清除全部限速/断网规则」一键还原。断网、统计、计费功能不涉及此类风险。

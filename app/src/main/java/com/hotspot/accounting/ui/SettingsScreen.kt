@@ -120,11 +120,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 if (c == null) {
                     Text("正在检测…", style = MaterialTheme.typography.bodySmall)
                 } else {
-                    KeyValue("断网（按 MAC）", if (c.canBlock) "可用" else "不可用",
-                        error = !c.canBlock)
+                    // Shows which mechanism will actually be used. The previous version only checked
+                    // for ebtables and reported blocking as unavailable on ROMs that have nftables,
+                    // even though nftables can block by MAC perfectly well.
+                    KeyValue("断网方式", c.blockMechanism, error = !c.canBlock)
                     KeyValue("限速", if (c.canRateLimit) "可用" else "不可用",
                         error = !c.canRateLimit)
                     KeyValue("tc", if (c.hasTc) "已找到" else "缺失")
+                    KeyValue("nft bridge", if (c.hasNftBridge) "可用" else "不可用")
                     KeyValue("ebtables", if (c.hasEbtables) "已找到" else "缺失")
                     KeyValue("ifb 模块", if (c.ifbSupported) "可用" else "不可用")
                     c.notes.forEach {

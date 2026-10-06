@@ -30,6 +30,13 @@ class NetControl {
         val hasEbtables: Boolean,
         val hasIptables: Boolean,
         /**
+         * True when `nft` exists AND its bridge family works on this kernel.
+         *
+         * This is the preferred blocking mechanism. It is not merely an ebtables substitute: the
+         * bridge family sees the client's original MAC, which is the property blocking depends on.
+         */
+        val hasNftBridge: Boolean,
+        /**
          * Every tethering interface present, with its transport.
          *
          * A phone commonly offers Wi-Fi *and* USB tethering simultaneously, so a single interface is
@@ -39,8 +46,25 @@ class NetControl {
         val ifbSupported: Boolean,
         val notes: List<String>,
     ) {
-        /** Blocking needs a layer where the client MAC is still identifiable. */
-        val canBlock: Boolean get() = hasEbtables || hasIptables
+        /**
+         * Blocking needs a layer where the client MAC is still identifiable.
+         *
+         * `ebtables` was originally treated as the only option, which wrongly disabled blocking on
+         * ROMs that ship nftables but not ebtables — including the device this app was built for,
+         * where counting already worked through the nft bridge family. Any of the three is capable;
+         * the IP-based one is last because a DHCP renewal defeats it.
+         */
+        val canBlock: Boolean get() = hasNftBridge || hasEbtables || hasIptables
+
+        /** Identifies the mechanism actually used, for the diagnostics panel. */
+        val blockMechanism: String
+            get() = when {
+                hasNftBridge -> "nftables bridge（按 MAC）"
+                hasEbtables -> "ebtables（按 MAC）"
+                hasIptables -> "iptables FORWARD（按 IP，续租会失效）"
+                else -> "不可用"
+            }
+
         /** Rate limiting needs tc plus at least one usable attachment point. */
         val canRateLimit: Boolean get() = hasTc && (ifbSupported || tetherInterfaces.isNotEmpty())
 
@@ -65,6 +89,15 @@ class NetControl {
         val ifaces = DeviceDiscovery.tetherInterfaces()
         val notes = mutableListOf<String>()
 
+        // Bridge-family nftables is the preferred blocking layer. Detect it for real rather than
+        // assuming, because the binary can exist on a kernel built without CONFIG_NF_TABLES_BRIDGE.
+        val hasNftBridge = probeNftBridge()
+        if (!hasNftBridge && !hasEbtables) {
+            notes += "nftables bridge 与 ebtables 都不可用，断网只能按 IP 下发，客户端换 IP 后会失效"
+        } else if (hasNftBridge) {
+            notes += "断网使用 nftables bridge，按 MAC 拦截，客户端换 IP 不受影响"
+        }
+
         // IFB lets us shape inbound traffic without touching the tethering qdisc.
         var ifbSupported = false
         if (hasTc) {
@@ -75,7 +108,6 @@ class NetControl {
             }
         }
         if (!hasTc) notes += "未找到 tc 命令，限速功能不可用"
-        if (!hasEbtables) notes += "未找到 ebtables，断网将退化为下发 iptables 规则"
         if (ifaces.isEmpty()) notes += "未能识别共享接口名，限速前请先连接一台设备用于探测"
 
         // Point out multi-transport setups explicitly: this is the case where using the wrong
@@ -88,7 +120,7 @@ class NetControl {
             notes += "USB 共享的客户端可达；USB 网卡抓包在二层，按 MAC 计数同样有效"
         }
 
-        val caps = Capabilities(hasTc, hasEbtables, hasIptables, ifaces, ifbSupported, notes)
+        val caps = Capabilities(hasTc, hasEbtables, hasIptables, hasNftBridge, ifaces, ifbSupported, notes)
         capabilities = caps
         return caps
     }
@@ -102,26 +134,159 @@ class NetControl {
     // ---------------------------------------------------------------------------------------
 
     /**
+     * Detects whether `nft` can create a bridge-family chain.
+     *
+     * Written because an earlier version of this class assumed `ebtables` was the only way to filter
+     * by MAC, and consequently refused to block at all on the target device. That ROM has no
+     * ebtables but does have nftables with bridge support — which the counter backend was already
+     * using — so blocking was being denied despite a perfectly capable mechanism being available.
+     */
+    private suspend fun probeNftBridge(): Boolean {
+        val nft = RootShell.which("nft") ?: return false
+        val probeTable = "hsacc_blockprobe"
+        RootShell.exec("$nft delete table bridge $probeTable 2>/dev/null")
+        val ok = RootShell.exec(
+            "$nft 'add table bridge $probeTable; " +
+                "add chain bridge $probeTable c { type filter hook prerouting priority -250; policy accept; }' 2>&1"
+        ).ok
+        RootShell.exec("$nft delete table bridge $probeTable 2>/dev/null")
+        return ok
+    }
+
+    /**
      * Administratively blocks or unblocks a client.
      *
-     * Implemented in the bridge family via `ebtables` when present, because the client's MAC is
-     * still the ethernet source there. Without `ebtables` we refuse rather than silently installing
-     * an IP-based rule that would break as soon as the client's lease changes.
+     * Preference order, and why:
+     *  1. **nftables bridge** — sees the client's original MAC and is filtered before the IP stack,
+     *     so a DHCP renewal cannot evade it. Already proven present, since the counter backend runs
+     *     in the same family.
+     *  2. **ebtables** — equivalent semantics, kept for kernels built without nft bridge support.
+     *  3. **iptables** — last resort. It can only match an IP address, so the block silently stops
+     *     applying the moment the client renews its lease. Used only when nothing else exists, and
+     *     reported as such rather than pretending it is equivalent.
      */
     suspend fun setBlocked(mac: String, blocked: Boolean, currentIp: String?): Result<Unit> {
         val m = requireValidMac(mac)
         val caps = capabilities()
 
-        return if (caps.hasEbtables) {
-            setBlockedEbtables(m, blocked)
-        } else {
-            // Explicitly refuse: an IP-based block is not equivalent and the caller must opt in.
-            Result.failure(
+        return when {
+            caps.hasNftBridge -> setBlockedNft(m, blocked)
+            caps.hasEbtables -> setBlockedEbtables(m, blocked)
+            caps.hasIptables -> setBlockedIptables(m, blocked, currentIp)
+            else -> Result.failure(
                 IllegalStateException(
-                    "缺少 ebtables，无法按 MAC 断网。当前 ROM 上仅能按 IP 限制，" +
-                        "且客户端续租换 IP 后会失效，因此未执行。"
+                    "当前 ROM 上 nftables bridge、ebtables、iptables 都不可用，无法执行断网。"
                 )
             )
+        }
+    }
+
+    /**
+     * Blocks by MAC using nftables in the bridge family.
+     *
+     * Both directions are needed for the same reason the counters need two rules: one hook sees a
+     * frame only once, so `ether saddr` stops the client's outbound traffic while `ether daddr`
+     * stops anything already on its way in.
+     */
+    private suspend fun setBlockedNft(mac: String, blocked: Boolean): Result<Unit> {
+        val nft = RootShell.which("nft") ?: return Result.failure(IllegalStateException("未找到 nft"))
+        val table = "hsacc_block"
+        val chain = "prerouting"
+
+        return try {
+            if (blocked) {
+                // Chain is created once and left in place; removing the table would also drop the
+                // rules of any other device that is currently blocked.
+                val install = RootShell.exec(
+                    "$nft 'add table bridge $table; " +
+                        "add chain bridge $table $chain " +
+                        "{ type filter hook prerouting priority -250; policy accept; }' 2>&1"
+                )
+                if (!install.ok && !install.stdout.contains("File exists")) {
+                    throw IllegalStateException(install.stdout + install.stderr)
+                }
+                // Comment tags make the rules identifiable for idempotent removal.
+                val add = RootShell.exec(
+                    "$nft 'add rule bridge $table $chain ether saddr $mac " +
+                        "counter comment \"hsacc:block:$mac\" drop; " +
+                        "add rule bridge $table $chain ether daddr $mac " +
+                        "counter comment \"hsacc:block:$mac\" drop' 2>&1"
+                )
+                if (!add.ok) throw IllegalStateException(add.stdout + add.stderr)
+                appliedBlocks += mac
+            } else {
+                // Delete by handle so we remove exactly our rules and nothing else.
+                val handles = findBlockRuleHandles(mac)
+                if (handles.isNotEmpty()) {
+                    val deletes = handles.joinToString("; ") {
+                        "delete rule bridge $table $chain handle $it"
+                    }
+                    RootShell.exec("$nft '$deletes' 2>&1")
+                }
+                appliedBlocks -= mac
+                // Drop the table only when nothing remains blocked, so the ruleset is left clean.
+                if (appliedBlocks.isEmpty()) {
+                    RootShell.exec("$nft delete table bridge $table 2>/dev/null")
+                }
+            }
+            Result.success(Unit)
+        } catch (t: Throwable) {
+            Log.e(TAG, "setBlockedNft($mac,$blocked) failed: ${t.message}")
+            Result.failure(t)
+        }
+    }
+
+    /** Finds the nft rule handles belonging to [mac] in the blocking chain. */
+    private suspend fun findBlockRuleHandles(mac: String): List<String> {
+        val nft = RootShell.which("nft") ?: return emptyList()
+        val dump = RootShell.execOrNull(
+            "$nft -a list chain bridge hsacc_block prerouting 2>/dev/null"
+        ).orEmpty()
+        val handles = mutableListOf<String>()
+        for (line in dump.lineSequence()) {
+            if (!line.contains("hsacc:block:$mac")) continue
+            Regex("""#\s*handle\s+(\d+)""").find(line)?.groupValues?.get(1)?.let { handles += it }
+        }
+        return handles
+    }
+
+    /**
+     * Last-resort block by IP address.
+     *
+     * Documented as lossy at the call site: an iptables rule cannot express "this MAC", so the block
+     * lasts only until the client's DHCP lease changes.
+     */
+    private suspend fun setBlockedIptables(mac: String, blocked: Boolean, ip: String?): Result<Unit> {
+        val ipt = RootShell.which("iptables")
+            ?: return Result.failure(IllegalStateException("未找到 iptables"))
+        if (ip.isNullOrBlank()) {
+            return Result.failure(
+                IllegalStateException("该设备当前没有 IP，按 IP 断网无法执行；请等它重新连接后重试。")
+            )
+        }
+        return try {
+            if (blocked) {
+                RootShell.exec(
+                    "$ipt -I FORWARD 1 -s $ip -m comment --comment \"hsacc:block:$mac\" -j DROP 2>&1"
+                )
+                RootShell.exec(
+                    "$ipt -I FORWARD 1 -d $ip -m comment --comment \"hsacc:block:$mac\" -j DROP 2>&1"
+                )
+                appliedBlocks += mac
+            } else {
+                repeat(2) {
+                    RootShell.exec(
+                        "$ipt -D FORWARD -s $ip -m comment --comment \"hsacc:block:$mac\" -j DROP 2>/dev/null"
+                    )
+                    RootShell.exec(
+                        "$ipt -D FORWARD -d $ip -m comment --comment \"hsacc:block:$mac\" -j DROP 2>/dev/null"
+                    )
+                }
+                appliedBlocks -= mac
+            }
+            Result.success(Unit)
+        } catch (t: Throwable) {
+            Result.failure(t)
         }
     }
 
@@ -352,11 +517,25 @@ class NetControl {
         val log = mutableListOf<String>()
         val caps = capabilities()
 
+        // nftables blocking table. Dropping the whole table removes every drop rule at once, which is
+        // exactly the intent here.
+        if (caps.hasNftBridge) {
+            RootShell.exec("nft delete table bridge hsacc_block 2>/dev/null")
+            log += "已清除 nftables bridge 断网规则"
+        }
         if (caps.hasEbtables) {
             RootShell.exec("ebtables -D FORWARD -j HSACC_BLOCK 2>/dev/null")
             RootShell.exec("ebtables -F HSACC_BLOCK 2>/dev/null")
             RootShell.exec("ebtables -X HSACC_BLOCK 2>/dev/null")
             log += "已清除 ebtables 断网规则"
+        }
+        if (caps.hasIptables) {
+            // Comment-tagged rules from the last-resort IP path. Handles are unknown, so the rules
+            // are removed by repeating the delete until it stops matching.
+            RootShell.exec(
+                "for i in 1 2 3 4; do iptables -D FORWARD -m comment --comment " +
+                    "\"hsacc:block\" -j DROP 2>/dev/null || break; done"
+            )
         }
         // Clean every tether interface, not just one: with Wi-Fi and USB tethering both active, a
         // qdisc could have been created on either, and leaving one behind would keep throttling.
